@@ -1,0 +1,15 @@
+solver
+solver.exe
+a.out
+
+*.o
+*.obj
+
+training_results.txt
+strategies.txt
+*.log
+*.out
+
+.vscode
+
+PokerHandEvaluator

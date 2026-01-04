@@ -1,0 +1,5 @@
+Generalized CFR solver in C++, applied to a specific game engine. 
+
+Game rules: Two player game. Cards from a standard 52 card deck arranged in a 2 by 4 grid without replacement. Start with 100 dollars in capital. Each round submit a minimum 1 dollar bid on both cards, then can choose to bid on a card you want. End up with exactly 4 cards. Go all in against your opponent with your remaining capital. A board of 5 cards is dealt out randomly, and the money is distributed according to PLO rules.
+
+Not trained on many iterations for now.

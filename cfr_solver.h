@@ -6,6 +6,10 @@
 #include <unordered_map>
 #include <random>
 #include <string>
+#include <mutex>
+#include <shared_mutex>
+#include <memory>
+#include <omp.h>
 #include "game_state.h"
 using namespace std;
 
@@ -29,16 +33,30 @@ struct Node { //represents information set
 template<typename GameType>
 class CFRSolver {
     unordered_map<string, Node> nodeMap;
+
+    mutable shared_mutex map_mutex;
+    static const int NUM_SHARDS = 4096;
+    vector<unique_ptr<mutex>> value_mutexes;
+
+    mutex& getShardMutex(const string& key) {
+        size_t hash_val = hash<string>{}(key);
+        return *value_mutexes[hash_val % NUM_SHARDS];
+    }
     
 
 public:
-    CFRSolver() {};
+    CFRSolver() {
+        for(int i=0; i<NUM_SHARDS; i++) {
+            value_mutexes.push_back(make_unique<mutex>());
+        }
+        nodeMap.reserve(20000000);
+    };
 
     ~CFRSolver() {};
 
     double cfr(GameType state, int update_player, double pi_player);
 
-    void train(int iterations);
+    void train(int iterations, int num_threads);
 
     const unordered_map<string,Node>& getNodeMap() const;
 };
@@ -56,16 +74,40 @@ double CFRSolver<GameType>::cfr(GameType state, int update_player, double pi_pla
     vector<Action> legal_actions;
     state.getLegalActions(legal_actions);
 
-    Node& node = nodeMap[infoSet];
-    if (node.regretSum.empty()) {
-        node.regretSum.resize(legal_actions.size(), 0.0);
-        node.strategySum.resize(legal_actions.size(), 0.0);
 
-        //node.infoSet = infoSet;
+    Node* nodePtr = nullptr;
+    {
+        shared_lock<shared_mutex> read_lock(map_mutex);
+        auto it = nodeMap.find(infoSet);
+        if (it != nodeMap.end()) {
+            nodePtr = &it->second;
+        }
     }
 
-    //double current_player_reach = reach_probabilities[current_player];
-    vector<double> strategy = node.getStrategy((current_player == update_player) ? pi_player : 0);
+    if (!nodePtr) {
+        unique_lock<shared_mutex> write_lock(map_mutex);
+        auto it = nodeMap.find(infoSet);
+        if (it != nodeMap.end()) {
+            nodePtr = &it->second;
+        }
+        else {
+            auto& nodeRef = nodeMap[infoSet];
+            nodePtr = &nodeRef;
+        }
+    }
+    nodePtr->regretSum.resize(legal_actions.size(), 0.0);
+    nodePtr->strategySum.resize(legal_actions.size(), 0.0);
+
+    vector<double> strategy;
+    {
+        lock_guard<mutex> lock(getShardMutex(infoSet));
+        strategy = nodePtr->getStrategy((current_player == update_player) ? pi_player : 0);
+    }
+
+
+
+    
+
     
 
     if (current_player != update_player) {
@@ -102,9 +144,16 @@ double CFRSolver<GameType>::cfr(GameType state, int update_player, double pi_pla
         nodeUtil += strategy[a]*util[a];
     }
 
-    for (int a=0; a<legal_actions.size(); a++) {
-        double regret = util[a] - nodeUtil;
-        node.regretSum[a] += regret;
+
+    {
+        lock_guard<mutex> lock(getShardMutex(infoSet));
+        for (size_t a = 0; a < legal_actions.size(); a++) {
+            double regret = util[a] - nodeUtil;
+            nodePtr->regretSum[a] += regret;
+            if (current_player == update_player) {
+                nodePtr->strategySum[a] += pi_player * strategy[a];
+            }
+        }
     }
 
 
@@ -124,20 +173,21 @@ const unordered_map<string,Node>& CFRSolver<GameType>::getNodeMap() const {
 
 
 template<typename GameType>
-void CFRSolver<GameType>::train(int iterations) {
-    double totalUtil = 0;
+void CFRSolver<GameType>::train(int iterations, int num_threads) {
 
+    #pragma omp parallel for schedule(dynamic) num_threads(num_threads)
     for (int z=0; z<iterations; z++) {
         GameType root;
 
         for (int i=0; i<NUM_PLAYERS; i++) {
-            totalUtil += cfr(root,i,1.0);
+            cfr(root,i,1.0);
         }
 
-        if (z%1000 == 0) {
-             cout << "Iteration " << z << endl;
+        if (z%10000 == 0 && omp_get_thread_num() == 0) {
+            #pragma omp critical
+            cout << "Iteration " << z << endl;
+            cout << nodeMap.size() << endl;
         }
-        if (z%10000 == 0) cout << nodeMap.size() << endl;
 
     }
 }
@@ -152,72 +202,4 @@ void CFRSolver<GameType>::train(int iterations) {
 
 
 
-/*template<typename GameType>
-double CFRSolver<GameType>::cfr(GameType state, int update_player, vector<double> reach_probabilities) {
-        if (state.isTerminal()) {
-            return state.getUtility(update_player);
-        }
 
-        int current_player = state.getCurrentPlayer();
-        string infoSet = state.getInfoSet();
-        vector<Action> legal_actions;
-        state.getLegalActions(legal_actions);
-
-        Node& node = nodeMap[infoSet];
-        if (node.regretSum.empty()) {
-            node.regretSum.resize(legal_actions.size(), 0.0);
-            node.strategy.resize(legal_actions.size(), 0.0);
-            node.strategySum.resize(legal_actions.size(), 0.0);
-            node.infoSet = infoSet;
-        }
-
-        double current_player_reach = reach_probabilities[current_player];
-        vector<double> strategy = node.getStrategy(current_player_reach);
-        vector<double> util(legal_actions.size(),0);
-
-        double nodeUtil = 0;
-        for (int a=0; a<legal_actions.size(); a++) {
-            GameType nextState = state;
-
-            nextState.applyAction(legal_actions[a]);
-
-            vector<double> reach_copy = reach_probabilities;
-            reach_copy[current_player] *= strategy[a];
-
-            util[a] = cfr(nextState, update_player, reach_copy);
-
-            nodeUtil += strategy[a] * util[a];
-        }
-
-        if (current_player == update_player) {
-            double opponent_reach = 1.0;
-            for (int r=0; r<reach_probabilities.size(); r++) {
-                if (r != current_player) {
-                    opponent_reach *= reach_probabilities[r];
-                }
-            }
-            for (int a=0; a<legal_actions.size(); a++) {
-                double regret = util[a] - nodeUtil;
-                node.regretSum[a] += opponent_reach*regret;
-            }
-        }
-
-
-        return nodeUtil;
-
-}*/
-
-
-/*
-template<typename GameType>
-void CFRSolver<GameType>::pruneNegativeRegrets() {
-    for (auto& pair : nodeMap) {
-        Node& node = pair.second;
-        for (int a = 0; a < node.regretSum.size(); a++) {
-            if (node.regretSum[a] < 0) {
-                node.regretSum[a] = 0;  // Discard negative regret
-            }
-        }
-    }
-}
-*/

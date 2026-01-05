@@ -1,14 +1,17 @@
 #include <iostream>
 #include <fstream>
-#include <omp.h>
+#include <iomanip>
 #include "cfr_solver.h"
 #include "my_game_engine.h"
 using namespace std;
 
 int main() {
+    int num_threads = 8;
+
     CFRSolver<PloAuctionGame> solver;
-    cout << "Hi!!!!!!!!!!!!\n";
-    solver.train(7000000);
+    int iterations = 200000000;
+    cout << "Iterations starting\n";
+    solver.train(iterations, num_threads);
 
     ofstream out("strategies.txt");
 
